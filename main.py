@@ -1,6 +1,7 @@
 import os
 import secrets
 import time
+import yt_dlp
 from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -152,6 +153,30 @@ def download_file_api(task_id: str):
         raise HTTPException(status_code=500, detail="File could not be found.")
     filename = os.path.basename(file_path)
     return FileResponse(path=file_path, filename=filename, media_type="audio/mpeg")
+
+
+@app.get("/api/stream")
+async def stream_audio_api(v: str):
+    if not v:
+        raise HTTPException(status_code=400, detail="Video ID is required")
+    try:
+        ydl_opts = {
+            'format': 'bestaudio/best',
+            'quiet': True,
+            'no_warnings': True,
+            'skip_download': True,
+        }
+        def _get_url():
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(f"https://www.youtube.com/watch?v={v}", download=False)
+                return info.get('url')
+        
+        url = await run_in_threadpool(_get_url)
+        if url:
+            return RedirectResponse(url)
+        raise HTTPException(status_code=404, detail="Stream URL not found")
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ── Google OAuth ──────────────────────────────────────────────────────────────

@@ -19,6 +19,312 @@ let homeFetching = false;  // Prevent parallel fetches
 let homeMode = 'explore';  // 'explore' | 'discover'
 let currentUser = null;
 
+/* ────────────────────────────────────────────────────────
+   PLAYER STATE
+──────────────────────────────────────────────────────── */
+let player = null;
+let playerReady = false;
+let progressInterval = null;
+let currentVideoId = null;
+let isFallback = false;
+let fbAudio = new Audio();
+
+fbAudio.addEventListener('playing', () => {
+    const playIcon = $('playIcon');
+    const pauseIcon = $('pauseIcon');
+    if (playIcon) playIcon.style.display = 'none';
+    if (pauseIcon) pauseIcon.style.display = 'block';
+    startProgressLoop();
+});
+
+fbAudio.addEventListener('pause', () => {
+    const playIcon = $('playIcon');
+    const pauseIcon = $('pauseIcon');
+    if (playIcon) playIcon.style.display = 'block';
+    if (pauseIcon) pauseIcon.style.display = 'none';
+    stopProgressLoop();
+});
+
+fbAudio.addEventListener('ended', () => {
+    console.log("Fallback song ended, resetting...");
+    const seeker = $('playBarSeek');
+    const playTime = $('playTime');
+    if (seeker) {
+        seeker.value = 0;
+        updateBarFill(seeker, 'progressBarFill');
+    }
+    if (playTime) {
+        const dur = fbAudio.duration || 0;
+        playTime.textContent = `0:00 / ${fmtDur(dur)}`;
+    }
+});
+
+function startFallbackStream() {
+    console.log("Starting fallback stream for restricted video...");
+    isFallback = true;
+    if (player && typeof player.stopVideo === 'function') player.stopVideo();
+    fbAudio.src = `/api/stream?v=${currentVideoId}`;
+    fbAudio.play().catch(e => console.error("Fallback play failed:", e));
+}
+
+/* ────────────────────────────────────────────────────────
+   YOUTUBE PLAYER
+──────────────────────────────────────────────────────── */
+function loadYouTubeAPI() {
+    if (window.YT && window.YT.Player) {
+        onYouTubeIframeAPIReady();
+        return;
+    }
+    const tag = document.createElement('script');
+    tag.src = "https://www.youtube.com/iframe_api";
+    const firstScriptTag = document.getElementsByTagName('script')[0];
+    firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
+}
+
+function onYouTubeIframeAPIReady() {
+    console.log("YouTube API Ready, initializing player...");
+    player = new YT.Player('yt-player-hidden', {
+        height: '200',
+        width: '200',
+        videoId: '',
+        playerVars: {
+            'autoplay': 1,
+            'controls': 0,
+            'disablekb': 1,
+            'fs': 0,
+            'rel': 0,
+            'enablejsapi': 1,
+            'iv_load_policy': 3,
+            'origin': window.location.origin
+        },
+        events: {
+            'onReady': (event) => { 
+                console.log("YT Player Ready and Active");
+                playerReady = true; 
+            },
+            'onStateChange': onPlayerStateChange,
+            'onError': (e) => {
+                console.error("YT Player Error:", e.data);
+                if (e.data === 150 || e.data === 101) {
+                    console.warn("Embedding restricted. Switching to fallback HTML5 audio stream.");
+                    startFallbackStream();
+                }
+            }
+        }
+    });
+}
+
+function onPlayerStateChange(event) {
+    const playIcon = $('playIcon');
+    const pauseIcon = $('pauseIcon');
+
+    if (event.data === YT.PlayerState.PLAYING) {
+        if (playIcon) playIcon.style.display = 'none';
+        if (pauseIcon) pauseIcon.style.display = 'block';
+        startProgressLoop();
+    } else {
+        if (playIcon) playIcon.style.display = 'block';
+        if (pauseIcon) pauseIcon.style.display = 'none';
+        stopProgressLoop();
+    }
+    
+    if (event.data === YT.PlayerState.ENDED) {
+        console.log("Song ended, resetting seeker...");
+        const seeker = $('playBarSeek');
+        const playTime = $('playTime');
+        if (seeker) {
+            seeker.value = 0;
+            updateBarFill(seeker, 'progressBarFill');
+        }
+        if (playTime) {
+            const dur = player.getDuration() || 0;
+            playTime.textContent = `0:00 / ${fmtDur(dur)}`;
+        }
+    }
+}
+
+function playSong(vidId, title, artist, thumb) {
+    if (!player || typeof player.loadVideoById !== 'function') {
+        // Player not ready, try again in 500ms
+        setTimeout(() => playSong(vidId, title, artist, thumb), 500);
+        return;
+    }
+    
+    // Reset fallback state
+    currentVideoId = vidId;
+    isFallback = false;
+    fbAudio.pause();
+    fbAudio.removeAttribute('src');
+
+    // Show bar
+    const bar = $('playBar');
+    if (bar) bar.classList.remove('hidden');
+    
+    // Update bar UI
+    const titleEl = $('playBarTitle');
+    const artistEl = $('playBarArtist');
+    const thumbEl = $('playBarThumb');
+    
+    if (titleEl) titleEl.textContent = title;
+    if (artistEl) artistEl.textContent = artist;
+    if (thumbEl) thumbEl.src = thumb;
+
+    // Reset seeker UI immediately
+    const seeker = $('playBarSeek');
+    const playTime = $('playTime');
+    if (seeker) {
+        seeker.value = 0;
+        updateBarFill(seeker, 'progressBarFill');
+    }
+    if (playTime) playTime.textContent = '0:00 / 0:00';
+    
+    // Load and play
+    try {
+        console.log("Playing:", vidId, title);
+        player.loadVideoById(vidId);
+        // loadVideoById usually autoplays, but we call playVideo to be sure
+        setTimeout(() => {
+            if (player.getPlayerState() !== YT.PlayerState.PLAYING) {
+                player.playVideo();
+            }
+        }, 300);
+    } catch (e) {
+        console.error("Playback error:", e);
+    }
+}
+
+function togglePlay() {
+    if (isFallback) {
+        if (fbAudio.paused) fbAudio.play();
+        else fbAudio.pause();
+        return;
+    }
+    if (!playerReady) return;
+    const state = player.getPlayerState();
+    if (state === YT.PlayerState.PLAYING) {
+        player.pauseVideo();
+    } else {
+        player.playVideo();
+    }
+}
+
+function startProgressLoop() {
+    stopProgressLoop();
+    progressInterval = setInterval(() => {
+        let cur = 0;
+        let dur = 0;
+        if (isFallback) {
+            cur = fbAudio.currentTime;
+            dur = fbAudio.duration;
+        } else {
+            if (!playerReady || typeof player.getCurrentTime !== 'function') return;
+            cur = player.getCurrentTime();
+            dur = player.getDuration();
+        }
+
+        if (dur > 0) {
+            const pct = (cur / dur) * 100;
+            const seeker = $('playBarSeek');
+            if (seeker) {
+                seeker.value = pct;
+                updateBarFill(seeker, 'progressBarFill');
+            }
+            $('playTime').textContent = `${fmtDur(cur)} / ${fmtDur(dur)}`;
+        }
+    }, 500);
+}
+
+function updateBarFill(input, fillId) {
+    const fill = $(fillId);
+    if (fill) {
+        const pct = ((input.value - input.min) / (input.max - input.min)) * 100;
+        fill.style.width = pct + '%';
+    }
+}
+
+function stopProgressLoop() {
+    if (progressInterval) clearInterval(progressInterval);
+}
+
+// Attach Play Bar Listeners
+function initPlayerListeners() {
+    const playBtn = $('playBtn');
+    if (playBtn) playBtn.onclick = togglePlay;
+    
+    const seeker = $('playBarSeek');
+    if (seeker) {
+        seeker.oninput = function() {
+            if (isFallback) {
+                const dur = fbAudio.duration;
+                if (!dur) return;
+                fbAudio.currentTime = (this.value / 100) * dur;
+            } else {
+                if (!player || typeof player.getDuration !== 'function') return;
+                const dur = player.getDuration();
+                if (!dur) return;
+                const seekTo = (this.value / 100) * dur;
+                player.seekTo(seekTo, true);
+            }
+            updateBarFill(this, 'progressBarFill');
+        };
+    }
+    
+    const vol = $('volumeSlider');
+    if (vol) {
+        vol.oninput = function() {
+            if (isFallback) {
+                fbAudio.volume = this.value / 100;
+            } else {
+                if (!player || typeof player.setVolume !== 'function') return;
+                player.setVolume(this.value);
+            }
+            updateBarFill(this, 'volumeBarFill');
+        };
+        // Initial sync
+        updateBarFill(vol, 'volumeBarFill');
+    }
+
+    const muteBtn = $('muteBtn');
+    if (muteBtn) {
+        muteBtn.onclick = () => {
+            if (isFallback) {
+                fbAudio.muted = !fbAudio.muted;
+                if (fbAudio.muted) { muteBtn.classList.add('muted'); }
+                else { muteBtn.classList.remove('muted'); }
+            } else {
+                if (!player) return;
+                const isMuted = player.isMuted();
+                if (isMuted) {
+                    player.unMute();
+                    muteBtn.classList.remove('muted');
+                } else {
+                    player.mute();
+                    muteBtn.classList.add('muted');
+                }
+            }
+        };
+    }
+
+    const likeBtn = $('likeBtn');
+    if (likeBtn) {
+        likeBtn.onclick = () => {
+            likeBtn.classList.toggle('active');
+            if (likeBtn.classList.contains('active')) {
+                likeBtn.style.color = 'var(--red)';
+            } else {
+                likeBtn.style.color = '';
+            }
+        };
+    }
+}
+
+// Initial call
+if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', initPlayerListeners);
+} else {
+    initPlayerListeners();
+}
+
 async function fetchHomeBuffer(force = false) {
     if (homeFetching) return;
     homeFetching = true;
@@ -123,10 +429,20 @@ function renderHomeContent(songs, withRefresh = false) {
 
     // Attach download listeners
     main.querySelectorAll('.btn-dl-card').forEach(btn => {
-        btn.addEventListener('click', function() {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
             const url   = this.dataset.url;
             const title = this.dataset.title;
             queueDownload(url, title, this);
+        });
+    });
+
+    // Attach play listeners
+    main.querySelectorAll('.btn-play-card').forEach(btn => {
+        btn.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const d = this.dataset;
+            playSong(d.id, d.title, d.artist, d.thumb);
         });
     });
 
@@ -204,9 +520,12 @@ async function doSearch() {
         const artistSection = $('artistSection');
         if (artistResult.status === 'fulfilled' && artistResult.value?.artist) {
             artistSection.innerHTML = renderArtistCard(artistResult.value.artist, q);
-            artistSection.querySelector('.artist-card')?.addEventListener('click', function() {
-                openArtist(this.dataset.channelUrl, this.dataset.channelName);
-            });
+            const card = $('searchArtistCard');
+            if (card) {
+                card.addEventListener('click', function() {
+                    openArtist(this.dataset.channelUrl, this.dataset.channelName);
+                });
+            }
         }
 
         // Render songs list
@@ -224,6 +543,13 @@ async function doSearch() {
                         btn.addEventListener('click', function(e) {
                             e.stopPropagation();
                             queueDownload(this.dataset.url, this.dataset.title, this);
+                        });
+                    });
+                    soList.querySelectorAll('.btn-play-card').forEach(btn => {
+                        btn.addEventListener('click', function(e) {
+                            e.stopPropagation();
+                            const d = this.dataset;
+                            playSong(d.id, d.title, d.artist, d.thumb);
                         });
                     });
                     soList.querySelectorAll('[data-channel-url]').forEach(el => {
@@ -253,7 +579,7 @@ function renderArtistCard(artist, query) {
     
     return `
         <div class="section-hd"><h2>En İyi Eşleşme</h2></div>
-        <div class="artist-card" data-channel-url="${url}" data-channel-name="${name}" style="cursor:pointer">
+        <div id="searchArtistCard" class="artist-card" data-channel-url="${url}" data-channel-name="${name}" style="cursor:pointer">
             <div class="artist-card-img-wrap">
                 ${thumb
                     ? `<img src="${thumb}" alt="${name}" onerror="this.parentElement.innerHTML='<div class=artist-img-fallback>${name.charAt(0)}</div>'">`
@@ -383,12 +709,18 @@ function makeSongCardHTML(item) {
     const dur   = fmtDur(item.duration);
     const chUrl = escA(item.channel_url || '');
     const isOff = item.is_official;
+    const vidId = item.id;
 
     return `
         <div class="song-card">
             <div class="song-card-thumb">
                 ${thumb ? `<img src="${thumb}" loading="lazy" alt="${title}" onerror="this.parentElement.classList.add('no-img')">` : ''}
                 ${dur ? `<span class="song-card-dur">${dur}</span>` : ''}
+                
+                <button class="btn-play-card" data-id="${vidId}" data-title="${title}" data-artist="${ch}" data-thumb="${thumb}" title="Dinle">
+                    <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+                </button>
+
                 <button class="btn-dl-card" data-url="${url}" data-title="${title}" title="İndir">
                     <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2.5">
                         <path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
@@ -421,11 +753,20 @@ function makeRow(item, num) {
         </div>
         <div class="list-actions">
             ${dur ? `<span class="list-dur">${dur}</span>` : ''}
+            <button class="btn-play-list" data-id="${item.id}" data-title="${escH(item.title || '')}" data-artist="${escH(item.channel || '')}" data-thumb="${escA(item.thumbnail || '')}" title="Dinle">
+                <svg viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            </button>
             <button class="btn-dl-list" data-url="${escA(item.url)}" data-title="${escH(item.title || '')}">İndir</button>
         </div>
     `;
-    el.querySelector('.btn-dl-list').addEventListener('click', function() {
+    el.querySelector('.btn-dl-list').addEventListener('click', function(e) {
+        e.stopPropagation();
         queueDownload(item.url, item.title, this);
+    });
+    el.querySelector('.btn-play-list').addEventListener('click', function(e) {
+        e.stopPropagation();
+        const d = this.dataset;
+        playSong(d.id, d.title, d.artist, d.thumb);
     });
     return el;
 }
@@ -550,6 +891,9 @@ async function queueDownload(url, title, btn) {
    BOOT
 ──────────────────────────────────────────────────────── */
 (async () => {
+    // Start YT API load immediately
+    loadYouTubeAPI();
+
     // Start auth check and home buffer fetch in parallel
     Promise.all([
         initAuth(),

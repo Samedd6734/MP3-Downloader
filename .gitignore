@@ -8,6 +8,14 @@ venv/
 ENV/
 downloads/
 .agent/
+.agents/
 .gemini/
 /tmp/
 *.log
+*.json
+*_debug.json
+qwen_out.txt
+qwen_out_utf8.txt
+.vscode/
+node_modules/
+.DS_Store

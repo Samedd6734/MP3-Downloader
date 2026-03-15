@@ -42,17 +42,17 @@ def is_valid_track(title: str, duration) -> bool:
     return True
 
 def is_official_channel(channel: str) -> bool:
-    """Only keep tracks from official artist channels."""
+    """Detect official artist sources. Note: 'Topic' channels are often blocked from embedding."""
     if not channel:
         return False
     c = channel.lower()
     return (
-        "topic" in c or       # Auto-generated Topic channels
         "vevo" in c or        # VEVO channels
         "official" in c or    # Official channels
         "music" in c or       # Music channels
         "records" in c or     # Record labels
-        "müzik" in c          # Turkish music channels
+        "müzik" in c or       # Turkish music channels
+        "artist" in c         # Artist channels
     )
 
 # ── Home Discovery Queries — fast, diverse, official ─────────────────────────
@@ -168,8 +168,8 @@ def _ytm_search_url(query: str, count: int, official_only: bool = False) -> list
     try:
         from ytmusicapi import YTMusic
         ytm = YTMusic()
-        # filter="songs" ensures we get music tracks, not random videos
-        search_results = ytm.search(query, filter="songs", limit=count)
+        # filter="videos" tends to have much better embedding permissions than filter="songs" (Topic channels)
+        search_results = ytm.search(query, filter="videos", limit=count)
         
         results = []
         for r in search_results:
@@ -247,24 +247,37 @@ def search_artist_info(query: str) -> dict | None:
             # If top is already an artist, use it
             if r_type == "artist":
                 browse_id = t.get("browseId")
-                # Try to get more details (subs etc)
-                try:
-                    info = ytm.get_artist(browse_id)
-                    return {
-                        "name": info.get("name") or t.get("artist"),
-                        "channel_url": f"https://www.youtube.com/channel/{browse_id}",
-                        "thumbnail": (info.get("thumbnails") or t.get("thumbnails") or [{}])[-1].get("url"),
-                        "subscriber_count": info.get("subscribers"),
-                        "uploader_id": browse_id,
-                    }
-                except:
-                    return {
-                        "name": t.get("artist"),
-                        "channel_url": f"https://www.youtube.com/channel/{browse_id}",
-                        "thumbnail": (t.get("thumbnails") or [{}])[-1].get("url"),
-                        "subscriber_count": None,
-                        "uploader_id": browse_id,
-                    }
+                artist_name = t.get("artist")
+                
+                # Sometime 'browseId' and 'artist' are nested in 'artists' array
+                artists_list = t.get("artists") or []
+                if artists_list:
+                    if not browse_id:
+                        browse_id = artists_list[-1].get("id") if artists_list else None
+                    if not artist_name:
+                        artist_name = artists_list[0].get("name") if artists_list else None
+                
+                # Try to get more details (subs etc) from artist profile
+                if browse_id:
+                    try:
+                        info = ytm.get_artist(browse_id)
+                        return {
+                            "name": info.get("name") or artist_name or query,
+                            "channel_url": f"https://www.youtube.com/channel/{browse_id}",
+                            "thumbnail": (info.get("thumbnails") or t.get("thumbnails") or [{}])[-1].get("url"),
+                            "subscriber_count": info.get("subscribers"),
+                            "uploader_id": browse_id,
+                        }
+                    except:
+                        pass
+
+                return {
+                    "name": artist_name or query,
+                    "channel_url": f"https://www.youtube.com/channel/{browse_id}" if browse_id else "",
+                    "thumbnail": (t.get("thumbnails") or [{}])[-1].get("url"),
+                    "subscriber_count": t.get("subscribers"),
+                    "uploader_id": browse_id,
+                }
             
             # If top is a song/video, show the main artist of that song
             if r_type in ["song", "video"]:
@@ -310,46 +323,99 @@ def search_artist_info(query: str) -> dict | None:
     return None
 
 
-# ── Artist Songs — lazy loading ───────────────────────────────────────────────
 def get_artist_songs(channel_url: str, max_results: int = 20, offset: int = 0) -> list:
-    """Fetch songs from an artist's channel with offset for lazy loading."""
-    target = channel_url.rstrip("/") + "/videos"
-    opts = {
-        "extract_flat": "in_playlist",
-        "quiet": True,
-        "no_warnings": True,
-        "playliststart": offset + 1,
-        "playlistend": offset + max_results,
-        "socket_timeout": 15,
-    }
+    """
+    Fetch songs from an artist's channel. 
+    Uses a hybrid approach: Popular songs first, then search to reach the full discography.
+    """
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(target, download=False)
-            entries = info.get("entries") or []
-            channel_name = info.get("title", "")
-            results = []
-            for e in entries:
-                if not e:
-                    continue
-                title = e.get("title") or ""
-                duration = e.get("duration")
-                vid_id = e.get("id")
-                if not vid_id:
-                    continue
-                # On artist pages, include all non-blocked tracks
-                if not is_valid_track(title, duration):
-                    continue
-                results.append({
-                    "id": vid_id,
-                    "title": title,
-                    "url": f"https://www.youtube.com/watch?v={vid_id}",
-                    "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
-                    "channel": channel_name,
-                    "duration": duration,
-                })
-            return results
+        from ytmusicapi import YTMusic
+        ytm = YTMusic()
+        
+        # Extract browseId from URL
+        path_parts = channel_url.rstrip("/").split("/")
+        browse_id = path_parts[-1]
+        
+        artist_data = {}
+        channel_name = None
+        
+        try:
+            artist_data = ytm.get_artist(browse_id)
+            channel_name = artist_data.get("name")
+        except Exception as e:
+            print(f"YTM get_artist failed for {browse_id}: {e}")
+
+        # Try to gather tracks from the popular playlist or section
+        all_tracks = []
+        if artist_data and 'songs' in artist_data:
+            songs_section = artist_data['songs']
+            songs_browse_id = None
+            if isinstance(songs_section, dict):
+                songs_browse_id = songs_section.get("browseId")
+                
+            if songs_browse_id:
+                try:
+                    # Fetching up to 200 items from popular playlist if available
+                    # We fetch a large batch once to avoid overhead in pagination
+                    full_list = ytm.get_playlist(songs_browse_id, limit=200)
+                    all_tracks = full_list.get("tracks", [])
+                except:
+                    if isinstance(songs_section, dict):
+                        all_tracks = songs_section.get("results", [])
+            elif isinstance(songs_section, dict):
+                all_tracks = songs_section.get("results", [])
+
+        # ENHANCEMENT: If the popular list is too short or we have reached its end,
+        # fallback to a massive search for the artist's full discography.
+        # This allows us to reach 500+ songs as the user requested.
+        if (offset + max_results > len(all_tracks)) and channel_name:
+            print(f"Switching to search for exhaustive discography: {channel_name}")
+            # We search with a high limit to get as much as possible
+            # ytmusicapi search pagination is relatively fast
+            search_pool = ytm.search(channel_name, filter="songs", limit=max_results + offset + 50)
+            
+            # Merge logic: Add search results that aren't already in the tracks list
+            existing_ids = {t.get("videoId") for t in all_tracks if t.get("videoId")}
+            for s in search_pool:
+                vid_id = s.get("videoId")
+                if vid_id and vid_id not in existing_ids:
+                    all_tracks.append(s)
+                    existing_ids.add(vid_id)
+
+        # Slice the final combined list
+        songs_list = all_tracks[offset:offset+max_results]
+        
+        results = []
+        for s in songs_list:
+            vid_id = s.get("videoId")
+            if not vid_id: continue
+            
+            title = s.get("title") or "Unknown Title"
+            # Duration parsing
+            duration_sec = s.get("duration_seconds")
+            if not duration_sec and s.get("duration"):
+                d_str = s["duration"]
+                parts = d_str.split(":")
+                if len(parts) == 2: duration_sec = int(parts[0])*60 + int(parts[1])
+                elif len(parts) == 3: duration_sec = int(parts[0])*3600 + int(parts[1])*60 + int(parts[2])
+
+            if not is_valid_track(title, duration_sec):
+                continue
+
+            results.append({
+                "id": vid_id,
+                "title": title,
+                "url": f"https://www.youtube.com/watch?v={vid_id}",
+                "thumbnail": (s.get("thumbnails") or [{}])[-1].get("url") or f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
+                "channel": channel_name or s.get("artists", [{}])[0].get("name", "Sanatçı"),
+                "duration": duration_sec,
+                "is_official": True
+            })
+        
+        return results
     except Exception as ex:
-        print(f"Artist songs error: {ex}")
+        print(f"Artist songs error (YTM): {ex}")
+        # Final fallback: Try general search for the artist name if YTM fails
         return []
 
 
