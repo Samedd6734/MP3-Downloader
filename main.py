@@ -8,21 +8,12 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.concurrency import run_in_threadpool
 from downloader import (
     search_youtube, start_download, download_tasks,
-    get_artist_songs, get_random_songs, get_discover_songs,
+    get_artist_songs, get_random_songs,
     search_artist_info,
 )
 
 app = FastAPI()
 os.makedirs("static", exist_ok=True)
-
-# ── Google OAuth Config ────────────────────────────────────────────────────────
-GOOGLE_CLIENT_ID     = os.environ.get("GOOGLE_CLIENT_ID", "")
-GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "")
-REDIRECT_URI         = os.environ.get("REDIRECT_URI", "http://localhost:8000/api/auth/google/callback")
-OAUTH_SCOPE          = "openid email profile https://www.googleapis.com/auth/youtube.readonly"
-
-# In-memory session store (dev only — replace with Redis/DB for production)
-_sessions: dict[str, dict] = {}
 
 # ── Home Songs Cache — ultra-fast serving via pre-fetch ───────────────────────
 _home_cache: dict = {"songs": [], "fetched_at": 0, "seed": 0}
@@ -65,20 +56,7 @@ async def home_api(request: Request, refresh: bool = False):
     """
     Returns random official songs for the home screen.
     ?refresh=true forces a new batch (different seed).
-    If user is logged in, returns personalized discover songs.
     """
-    # Check for logged-in user session
-    session_id = request.cookies.get("session_id")
-    if session_id and session_id in _sessions:
-        user = _sessions[session_id]
-        access_token = user.get("access_token", "")
-        if access_token:
-            try:
-                songs = await run_in_threadpool(get_discover_songs, access_token, 50)
-                return {"results": songs, "mode": "discover", "user": user.get("name")}
-            except:
-                pass  # Fall through to random
-
     songs = await _ensure_home_cache(force_new=refresh)
     import random
     if refresh:
@@ -179,96 +157,3 @@ async def stream_audio_api(v: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ── Google OAuth ──────────────────────────────────────────────────────────────
-@app.get("/api/auth/google/start")
-def google_auth_start():
-    """Redirect to Google OAuth consent screen."""
-    if not GOOGLE_CLIENT_ID:
-        raise HTTPException(
-            status_code=501,
-            detail="Google OAuth not configured. Set GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET env vars."
-        )
-    state = secrets.token_urlsafe(16)
-    params = {
-        "client_id":     GOOGLE_CLIENT_ID,
-        "redirect_uri":  REDIRECT_URI,
-        "response_type": "code",
-        "scope":         OAUTH_SCOPE,
-        "access_type":   "offline",
-        "prompt":        "select_account",
-        "state":         state,
-    }
-    from urllib.parse import urlencode
-    url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode(params)
-    return RedirectResponse(url)
-
-
-@app.get("/api/auth/google/callback")
-async def google_auth_callback(code: str, state: str, response: Response):
-    """Handle Google OAuth callback, create session."""
-    if not GOOGLE_CLIENT_ID:
-        raise HTTPException(status_code=501, detail="Google OAuth not configured.")
-    
-    import httpx
-    try:
-        async with httpx.AsyncClient() as client:
-            # Exchange code for tokens
-            token_resp = await client.post(
-                "https://oauth2.googleapis.com/token",
-                data={
-                    "code":          code,
-                    "client_id":     GOOGLE_CLIENT_ID,
-                    "client_secret": GOOGLE_CLIENT_SECRET,
-                    "redirect_uri":  REDIRECT_URI,
-                    "grant_type":    "authorization_code",
-                }
-            )
-            tokens = token_resp.json()
-            access_token = tokens.get("access_token", "")
-            
-            # Get user info
-            user_resp = await client.get(
-                "https://www.googleapis.com/oauth2/v3/userinfo",
-                headers={"Authorization": f"Bearer {access_token}"}
-            )
-            user_info = user_resp.json()
-        
-        session_id = secrets.token_urlsafe(32)
-        _sessions[session_id] = {
-            "access_token": access_token,
-            "refresh_token": tokens.get("refresh_token", ""),
-            "name":    user_info.get("name", "Kullanıcı"),
-            "email":   user_info.get("email", ""),
-            "picture": user_info.get("picture", ""),
-        }
-        
-        resp = RedirectResponse("/")
-        resp.set_cookie("session_id", session_id, httponly=True, samesite="lax", max_age=86400 * 30)
-        return resp
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OAuth error: {e}")
-
-
-@app.get("/api/auth/status")
-def auth_status(request: Request):
-    """Returns current login state."""
-    session_id = request.cookies.get("session_id")
-    if session_id and session_id in _sessions:
-        user = _sessions[session_id]
-        return {
-            "logged_in": True,
-            "name":    user.get("name"),
-            "picture": user.get("picture"),
-            "email":   user.get("email"),
-        }
-    return {"logged_in": False}
-
-
-@app.post("/api/auth/logout")
-def auth_logout(request: Request, response: Response):
-    """Clear session."""
-    session_id = request.cookies.get("session_id")
-    if session_id in _sessions:
-        del _sessions[session_id]
-    response.delete_cookie("session_id")
-    return {"ok": True}

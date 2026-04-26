@@ -8,7 +8,6 @@ YouTube Music altyapısını kullanarak yüksek kaliteli (192kbps) MP3 indirme a
 - **Top Result Önceliği:** Aramalarda en alakalı sanatçıyı otomatik profile çıkarma.
 - **Resmi Sanatçı Kartları:** Sanatçı abone sayısı ve profil detayları.
 - **Sonsuz Kaydırma (Lazy Loading):** Sanatçı sayfalarında tüm şarkılara kesintisiz erişim.
-- **Google OAuth:** Kişiselleştirilmiş müzik önerileri için Google ile giriş desteği.
 - **Hızlı Dönüştürme:** Arka planda kuyruğa alınan ve anında indirilen MP3 dosyaları.
 
 ## 🚀 Kurulum
@@ -23,12 +22,8 @@ Bilgisayarınızda Python 3.9+ ve FFmpeg kurulu olmalıdır.
 pip install -r requirements.txt
 ```
 
-### 3. Google OAuth Yapılandırması (Opsiyonel)
-Keşfet özelliğini kullanmak için `.env` dosyasına veya ortam değişkenlerine şunları ekleyin:
-- `GOOGLE_CLIENT_ID`
-- `GOOGLE_CLIENT_SECRET`
 
-### 4. Çalıştırın
+### 3. Çalıştırın
 ```bash
 uvicorn main:app --reload
 ```

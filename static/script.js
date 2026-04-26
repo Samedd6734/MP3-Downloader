@@ -11,13 +11,14 @@ const $ = id => document.getElementById(id);
 const main  = $('main');
 const input = $('searchInput');
 
+let isDev = window.location.hostname === 'localhost';
+
 /* ────────────────────────────────────────────────────────
    HOME BUFFER — pre-fetched songs for instant serving
 ──────────────────────────────────────────────────────── */
 let homeBuffer = [];       // Pre-fetched songs waiting to be shown
 let homeFetching = false;  // Prevent parallel fetches
-let homeMode = 'explore';  // 'explore' | 'discover'
-let currentUser = null;
+let homeMode = 'explore';  // 'explore'
 
 /* ────────────────────────────────────────────────────────
    PLAYER STATE
@@ -330,10 +331,13 @@ async function fetchHomeBuffer(force = false) {
     homeFetching = true;
     try {
         const url = force ? '/api/home?refresh=true' : '/api/home';
-        const d = await apiFetch(url);
-        homeBuffer = d.results || [];
-        homeMode = d.mode || 'explore';
-        if (d.user) currentUser = { name: d.user };
+        const data = await apiFetch(url);
+        homeBuffer = data.results || [];
+        homeMode = data.mode || 'explore';
+
+        // Filter and add valid songs to buffer
+        const newSongs = data.results.filter(s => s.id && s.title && s.url);
+        homeBuffer.push(...newSongs);
     } catch (e) {
         console.warn('Home fetch failed:', e);
     } finally {
@@ -341,43 +345,22 @@ async function fetchHomeBuffer(force = false) {
     }
 }
 
-/* ────────────────────────────────────────────────────────
-   AUTH — Google login state
-──────────────────────────────────────────────────────── */
-async function initAuth() {
-    try {
-        const d = await apiFetch('/api/auth/status');
-        const btn = $('googleBtn');
-        const avatar = $('userAvatar');
-        if (d.logged_in) {
-            currentUser = d;
-            if (btn) btn.style.display = 'none';
-            if (avatar) {
-                avatar.style.display = 'flex';
-                avatar.innerHTML = `
-                    <img src="${escA(d.picture)}" alt="${escH(d.name)}" title="${escH(d.name)}" 
-                         onerror="this.style.display='none'">
-                    <button id="logoutBtn" onclick="doLogout()" title="Çıkış Yap">×</button>
-                `;
-            }
-        } else {
-            if (btn) btn.style.display = 'flex';
-            if (avatar) avatar.style.display = 'none';
-        }
-    } catch {}
-}
 
-async function doLogout() {
-    await fetch('/api/auth/logout', { method: 'POST' });
-    location.reload();
-}
+/* ────────────────────────────────────────────────────────
+   INITIALIZATION & AUTHENTICATION
+──────────────────────────────────────────────────────── */
+document.addEventListener('DOMContentLoaded', async () => {
+    loadYouTubeAPI();
+    initPlayerListeners();
+    goHome();
+});
+$('searchBtn').onclick = doSearch;
+input.onkeydown = e => { if (e.key === 'Enter') doSearch(); };
 
 /* ────────────────────────────────────────────────────────
    NAVIGATION
 ──────────────────────────────────────────────────────── */
 $('homeLink').onclick = e => { e.preventDefault(); goHome(); };
-$('searchBtn').onclick = doSearch;
-input.onkeydown = e => { if (e.key === 'Enter') doSearch(); };
 
 function goHome() {
     input.value = '';
@@ -404,9 +387,7 @@ function renderHomeContent(songs, withRefresh = false) {
         return;
     }
 
-    const modeLabel = homeMode === 'discover'
-        ? `<span class="mode-badge discover">✨ Keşfet — ${escH(currentUser?.name || '')}</span>`
-        : `<span class="mode-badge explore">🌍 Keşfet</span>`;
+    const modeLabel = `<span class="mode-badge explore" style="background:var(--red);color:#fff;">🌍 Keşfet</span>`;
 
     main.innerHTML = `
         <div class="home-header">

@@ -121,45 +121,6 @@ def get_random_songs(count: int = 50, seed: int | None = None) -> list:
     return unique[:count]
 
 
-# ── YTM Discover (Google OAuth) ───────────────────────────────────────────────
-def get_discover_songs(access_token: str, count: int = 50) -> list:
-    """
-    Fetch personalized YouTube Music recommendations using OAuth token.
-    Falls back to random songs if ytmusicapi is unavailable.
-    """
-    try:
-        from ytmusicapi import YTMusic
-        ytm = YTMusic(auth={"access_token": access_token})
-        home = ytm.get_home(limit=5)
-        results = []
-        for shelf in home:
-            for item in shelf.get("contents", []):
-                vid_id = (item.get("videoId") or "")
-                title = (item.get("title") or "")
-                if not vid_id or not title:
-                    continue
-                artists = item.get("artists") or []
-                channel = artists[0]["name"] if artists else "YouTube Music"
-                duration = item.get("duration_seconds")
-                if not is_valid_track(title, duration):
-                    continue
-                results.append({
-                    "id": vid_id,
-                    "title": title,
-                    "url": f"https://www.youtube.com/watch?v={vid_id}",
-                    "thumbnail": f"https://i.ytimg.com/vi/{vid_id}/mqdefault.jpg",
-                    "channel": channel,
-                    "duration": duration,
-                    "is_official": True,
-                })
-                if len(results) >= count:
-                    break
-            if len(results) >= count:
-                break
-        return results
-    except Exception as ex:
-        print(f"Discover Error (falling back): {ex}")
-        return get_random_songs(count)
 
 
 # ── Core fetcher — YouTube Music Search via ytmusicapi ─────────────────────────
@@ -229,6 +190,7 @@ def search_youtube(query: str, max_results: int = 12) -> list:
 
 
 # ── Search — Artist Info ───────────────────────────────────────────────────────
+
 def search_artist_info(query: str) -> dict | None:
     """
     Search for the most relevant artist/match on YouTube Music.
